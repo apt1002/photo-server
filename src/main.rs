@@ -3,7 +3,7 @@ use std::error::{Error};
 // use std::io::{Write};
 use std::fs::{File};
 use std::io::{Write};
-use std::path::{Path};
+use std::path::{Path, PathBuf};
 
 use tiny_http::{Method, Request, Response, Header};
 use url::{Url};
@@ -235,7 +235,25 @@ impl<'a> PhotoServer<'a> {
     /// Show an HTML frame around a single photo.
     pub fn frame(&self, dir_name: &Path, leaf_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
         let dimensions = params.get_dimensions();
-        let _jpeg_dir = self.document_root.join(dir_name);
+        // Enumerate the files in `jpeg_dir` and compute `prev` and `next` links.
+        let jpeg_dir = self.document_root.join(dir_name);
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for dir_entry in jpeg_dir.read_dir()? {
+            if let Some(path) = dir_entry?.path().file_name() {
+                if let Some(extension) = Path::new(path).extension() {
+                    if extension == "JPG" || extension == "jpg" { paths.push(path.into()); }
+                }
+            }
+        }
+        paths.sort();
+        let mut previouses: HashMap<&Path, &Path> = HashMap::new();
+        let mut nexts: HashMap<&Path, &Path> = HashMap::new();
+        let mut prev = paths.last().ok_or(HttpError::NotFound)?;
+        for p in &paths {
+            previouses.insert(&p, &prev);
+            nexts.insert(&prev, &p);
+            prev = p;
+        }
         // This substring contains a lot of `{` and `}` characters.
         let stylesheet =
 r#"body {background-color: #000000; color: #FFFFFF}
@@ -283,8 +301,8 @@ r#"<html>
             dir_name = dir_name.display(),
             base_name = leaf_name.with_extension("").display(),
             leaf_name = leaf_name.display(),
-            previous = "TODO",
-            next = "TODO",
+            previous = previouses.get(leaf_name).ok_or(HttpError::NotFound)?.display(),
+            next = nexts.get(leaf_name).ok_or(HttpError::NotFound)?.display(),
             dimensions = dimensions,
             w = dimensions.w,
             h = dimensions.h,
