@@ -46,6 +46,7 @@ impl_from_for_error!(std::io::Error);
 impl_from_for_error!(std::num::ParseIntError);
 impl_from_for_error!(std::char::ParseCharError);
 impl_from_for_error!(url::ParseError);
+impl_from_for_error!(image::ImageError);
 
 // ----------------------------------------------------------------------------
 
@@ -212,7 +213,13 @@ impl<'a> PhotoServer<'a> {
 
     /// Serve a resized JPEG file.
     pub fn rescale(&self, dir_name: &Path, leaf_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
-        Err(HttpError::Invalid)
+        let jpeg_name = self.document_root.join(dir_name).join(leaf_name);
+        let image = image::open(jpeg_name)?;
+        let (w, h) = params.get_dimensions();
+        let image = image.resize(w, h, image::imageops::FilterType::Lanczos3);
+        let mut buf = Vec::<u8>::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85).encode_image(&image)?;
+        Ok(HttpOkay::Jpeg(buf))
     }
     
     /// Show an HTML frame around a single photo.
