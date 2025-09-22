@@ -2,8 +2,8 @@ use std::collections::{HashMap};
 use std::error::{Error};
 // use std::io::{Write};
 use std::fs::{File};
+use std::io::{Write};
 use std::path::{Path};
-use std::str::{FromStr};
 
 use tiny_http::{Method, Request, Response, Header};
 use url::{Url};
@@ -190,6 +190,15 @@ impl<'a> PhotoServer<'a> {
         }
     }
 
+    /// Load `jpeg_name`, resize it, and encode it as a new JPEG file.
+    fn resize_jpeg(jpeg_name: &Path, (w, h): (u32, u32)) -> Result<Vec<u8>, HttpError> {
+        let image = image::open(jpeg_name)?;
+        let image = image.resize(w, h, image::imageops::FilterType::Lanczos3);
+        let mut ret = Vec::<u8>::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut ret, 85).encode_image(&image)?;
+        Ok(ret)
+    }
+
     /// Show thumbnails for all photos in a directory.
     pub fn index(&self, dir_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
         println!("index()");
@@ -199,20 +208,15 @@ impl<'a> PhotoServer<'a> {
     /// Serve a JPEG file directly.
     pub fn jpeg(&self, dir_name: &Path, leaf_name: &Path, _params: &Params) -> Result<HttpOkay, HttpError> {
         let jpeg_name = self.document_root.join(dir_name).join(leaf_name);
-        Ok(HttpOkay::File(File::open(jpeg_name)?))
+        Ok(HttpOkay::File(File::open(&jpeg_name)?))
     }
 
     /// Serve a resized JPEG file.
     pub fn rescale(&self, dir_name: &Path, leaf_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
         let jpeg_name = self.document_root.join(dir_name).join(leaf_name);
-        let image = image::open(jpeg_name)?;
-        let (w, h) = params.get_dimensions();
-        let image = image.resize(w, h, image::imageops::FilterType::Lanczos3);
-        let mut buf = Vec::<u8>::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85).encode_image(&image)?;
-        Ok(HttpOkay::Jpeg(buf))
+        Ok(HttpOkay::Jpeg(Self::resize_jpeg(&jpeg_name, params.get_dimensions())?))
     }
-    
+
     /// Show an HTML frame around a single photo.
     pub fn frame(&self, dir_name: &Path, leaf_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
         println!("frame()");
@@ -221,8 +225,15 @@ impl<'a> PhotoServer<'a> {
 
     /// Serve a JPEG thumbnail.
     pub fn thumb(&self, dir_name: &Path, leaf_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
-        println!("thumb()");
-        Err(HttpError::Invalid)
+        let thumbnail_dir = self.thumbnail_root.join(dir_name);
+        std::fs::create_dir_all(&thumbnail_dir)?;
+        let thumbnail_name = thumbnail_dir.join(leaf_name);
+        if let Ok(mut file) = File::create_new(&thumbnail_name) {
+            // Cached thumbnail file is missing; generate it.
+            let jpeg_name = self.document_root.join(dir_name).join(leaf_name);
+            file.write(&Self::resize_jpeg(&jpeg_name, (128, 96))?)?;
+        }
+        Ok(HttpOkay::File(File::open(&thumbnail_name)?))
     }
 }
 
