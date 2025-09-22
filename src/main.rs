@@ -67,17 +67,18 @@ impl Params {
         Self {w: parse_u32("w"), h: parse_u32("h")}
     }
 
-    /// Generate query parameters.
-    fn to_str(&self) -> String {
-        let mut ret = Vec::new();
-        if let Some(w) = self.w { ret.push(format!("w={}", w)); }
-        if let Some(h) = self.h { ret.push(format!("h={}", h)); }
-        ret.join("&")
-    }
-
     /// Returns `(w, h)` with sensible defaults and maxima.
     fn get_dimensions(&self) -> (u32, u32) {
         (self.w.unwrap_or(800).min(2048), self.h.unwrap_or(600).min(2048))
+    }
+}
+
+impl std::fmt::Display for Params {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let mut ret = Vec::new();
+        if let Some(w) = self.w { ret.push(format!("w={w}")); }
+        if let Some(h) = self.h { ret.push(format!("h={h}")); }
+        f.write_fmt(format_args!("?{}", ret.join("&")))
     }
 }
 
@@ -200,7 +201,7 @@ impl<'a> PhotoServer<'a> {
     }
 
     /// Show thumbnails for all photos in a directory.
-    pub fn index(&self, dir_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
+    pub fn index(&self, _dir_name: &Path, _params: &Params) -> Result<HttpOkay, HttpError> {
         println!("index()");
         Err(HttpError::Invalid)
     }
@@ -219,12 +220,62 @@ impl<'a> PhotoServer<'a> {
 
     /// Show an HTML frame around a single photo.
     pub fn frame(&self, dir_name: &Path, leaf_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
-        println!("frame()");
-        Err(HttpError::Invalid)
+        let jpeg_dir = self.document_root.join(dir_name);
+        let (w, h) = params.get_dimensions();
+        // This substring contains a lot of `{` and `}` characters.
+        let stylesheet =
+r#"body {background-color: #000000; color: #FFFFFF}
+a:link {color: #8080FF}
+a:visited {color: #C080FF}
+input[type="text"] {
+background-color: #404040; color: #FFFFFF;
+border: thin solid #808080
+}"#;
+        // Generate HTML.
+        Ok(HttpOkay::Html(format!(
+r#"<html>
+<head>
+<title>{dir_name}/{base_name}</title>
+<style type="text/css">
+{stylesheet}
+</style>
+</head>
+<body>
+<center><h3>{dir_name}/{base_name}</h3></center>
+<form action="{leaf_name}.html" method="get">
+<table align="center" valign="center">
+<tr>
+<td colspan="3" align="center">
+<a href="{previous}.html{params}">previous</a>
+<a href="{next}.html{params}">next</a>
+<a href=".{params}">up</a>
+<a href="{leaf_name}">original</a>
+</td>
+</tr>
+<tr>
+<td colspan="3" align="center">
+<img src="{leaf_name}{params}"/>
+</td>
+</tr>
+<tr>
+<td>Width <input type="text" name="w" value="{w}"/></td>
+<td>Height <input type="text" name="h" value="{h}"/></td>
+<td><input type="submit" value="Change size"/></td>
+</tr>
+</table>
+</form>
+</body>
+</html>"#,
+            dir_name = dir_name.display(),
+            base_name = leaf_name.with_extension("").display(),
+            leaf_name = leaf_name.display(),
+            previous = "TODO",
+            next = "TODO",
+        )))
     }
 
     /// Serve a JPEG thumbnail.
-    pub fn thumb(&self, dir_name: &Path, leaf_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
+    pub fn thumb(&self, dir_name: &Path, leaf_name: &Path, _params: &Params) -> Result<HttpOkay, HttpError> {
         let thumbnail_dir = self.thumbnail_root.join(dir_name);
         std::fs::create_dir_all(&thumbnail_dir)?;
         let thumbnail_name = thumbnail_dir.join(leaf_name);
