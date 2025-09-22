@@ -50,6 +50,24 @@ impl_from_for_error!(image::ImageError);
 
 // ----------------------------------------------------------------------------
 
+/// Requested size of an image.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct Dimensions {
+    /// The user-requested width.
+    pub w: u32,
+
+    /// The user-requested height.
+    pub h: u32,
+}
+
+impl std::fmt::Display for Dimensions {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "?w={}&h={}", self.w, self.h)
+    }
+}
+
+// ----------------------------------------------------------------------------
+
 /// Information about a request.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct Params {
@@ -63,22 +81,18 @@ struct Params {
 impl Params {
     /// Parse query parameters.
     fn new(params: &HashMap<String, String>) -> Self {
-        let parse_u32 = |key: &'static str| params.get(key).and_then(|s| s.trim().parse::<u32>().ok());
+        let parse_u32 = |key: &'static str| {
+            params.get(key).and_then(|s| s.trim().parse::<u32>().ok())
+        };
         Self {w: parse_u32("w"), h: parse_u32("h")}
     }
 
-    /// Returns `(w, h)` with sensible defaults and maxima.
-    fn get_dimensions(&self) -> (u32, u32) {
-        (self.w.unwrap_or(800).min(2048), self.h.unwrap_or(600).min(2048))
-    }
-}
-
-impl std::fmt::Display for Params {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let mut ret = Vec::new();
-        if let Some(w) = self.w { ret.push(format!("w={w}")); }
-        if let Some(h) = self.h { ret.push(format!("h={h}")); }
-        f.write_fmt(format_args!("?{}", ret.join("&")))
+    /// Fill in missing parameters with default values, and apply maxima.
+    pub fn get_dimensions(&self) -> Dimensions {
+        Dimensions {
+            w: 2048 .min(if let Some(w) = self.w { w } else { 800 }),
+            h: 2048 .min(if let Some(h) = self.h { h } else { 600 }),
+        }
     }
 }
 
@@ -192,9 +206,9 @@ impl<'a> PhotoServer<'a> {
     }
 
     /// Load `jpeg_name`, resize it, and encode it as a new JPEG file.
-    fn resize_jpeg(jpeg_name: &Path, (w, h): (u32, u32)) -> Result<Vec<u8>, HttpError> {
+    fn resize_jpeg(jpeg_name: &Path, d: Dimensions) -> Result<Vec<u8>, HttpError> {
         let image = image::open(jpeg_name)?;
-        let image = image.resize(w, h, image::imageops::FilterType::Lanczos3);
+        let image = image.resize(d.w, d.h, image::imageops::FilterType::Lanczos3);
         let mut ret = Vec::<u8>::new();
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut ret, 85).encode_image(&image)?;
         Ok(ret)
@@ -220,8 +234,8 @@ impl<'a> PhotoServer<'a> {
 
     /// Show an HTML frame around a single photo.
     pub fn frame(&self, dir_name: &Path, leaf_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
-        let jpeg_dir = self.document_root.join(dir_name);
-        let (w, h) = params.get_dimensions();
+        let dimensions = params.get_dimensions();
+        let _jpeg_dir = self.document_root.join(dir_name);
         // This substring contains a lot of `{` and `}` characters.
         let stylesheet =
 r#"body {background-color: #000000; color: #FFFFFF}
@@ -246,15 +260,15 @@ r#"<html>
 <table align="center" valign="center">
 <tr>
 <td colspan="3" align="center">
-<a href="{previous}.html{params}">previous</a>
-<a href="{next}.html{params}">next</a>
-<a href=".{params}">up</a>
+<a href="{previous}.html{dimensions}">previous</a>
+<a href="{next}.html{dimensions}">next</a>
+<a href=".{dimensions}">up</a>
 <a href="{leaf_name}">original</a>
 </td>
 </tr>
 <tr>
 <td colspan="3" align="center">
-<img src="{leaf_name}{params}"/>
+<img src="{leaf_name}{dimensions}"/>
 </td>
 </tr>
 <tr>
@@ -271,6 +285,9 @@ r#"<html>
             leaf_name = leaf_name.display(),
             previous = "TODO",
             next = "TODO",
+            dimensions = dimensions,
+            w = dimensions.w,
+            h = dimensions.h,
         )))
     }
 
@@ -282,7 +299,7 @@ r#"<html>
         if let Ok(mut file) = File::create_new(&thumbnail_name) {
             // Cached thumbnail file is missing; generate it.
             let jpeg_name = self.document_root.join(dir_name).join(leaf_name);
-            file.write(&Self::resize_jpeg(&jpeg_name, (128, 96))?)?;
+            file.write(&Self::resize_jpeg(&jpeg_name, Dimensions {w: 128, h: 96})?)?;
         }
         Ok(HttpOkay::File(File::open(&thumbnail_name)?))
     }
