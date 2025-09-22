@@ -49,44 +49,45 @@ impl_from_for_error!(url::ParseError);
 
 // ----------------------------------------------------------------------------
 
-/// Represent HTTP request parameters.
-#[derive(Debug)]
-pub struct Params(HashMap<String, String>);
+/// Parse an optional str.
+fn parse_optional<T: FromStr>(s: Option<&String>) -> Result<Option<T>, HttpError>
+where HttpError: From<<T as FromStr>::Err> {
+    if let Some(s) = s {
+        Ok(Some(s.parse::<T>()?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Information about a request.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct Params {
+    pub w: Option<u32>,
+    pub h: Option<u32>,
+}
 
 impl Params {
-    fn get<T: FromStr>(&self, key: &str) -> Result<T, HttpError>
-    where HttpError: From<<T as FromStr>::Err> {
-        Ok(self.0.get(key).ok_or(HttpError::Invalid)?.parse::<T>()?)
-    }
-
-    fn get_optional<T: FromStr>(&self, key: &str, default: T) -> Result<T, HttpError>
-    where HttpError: From<<T as FromStr>::Err> {
-        if let Some(s) = self.0.get(key) {
-            Ok(s.parse::<T>()?)
-        } else {
-            Ok(default)
-        }
-    }
-}
-
-// ----------------------------------------------------------------------------
-
-/// Information about a user.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct Session{
-    pub w: u32,
-    pub h: u32,
-}
-
-impl Session {
-    fn from_params(params: &Params) -> Result<Self, HttpError> {
+    fn new(params: &HashMap<String, String>) -> Result<Self, HttpError> {
         Ok(Self {
-            w: params.get_optional("w", 800)?.min(2048),
-            h: params.get_optional("h", 600)?.min(2048),
+            w: parse_optional(params.get("w"))?,
+            h: parse_optional(params.get("h"))?,
         })
     }
 
-    fn to_params(&self) -> String { format!("w={}&h={}", self.w, self.h) }
+    fn to_str(&self) -> String {
+        let mut ret = Vec::new();
+        if let Some(w) = self.w {
+            ret.push(format!("w={}", w));
+        }
+        if let Some(h) = self.h {
+            ret.push(format!("h={}", h));
+        }
+        ret.join("&")
+    }
+
+    fn get_dimensions(&self) -> (u32, u32) {
+        (self.w.unwrap_or(800).min(2048), self.h.unwrap_or(600).min(2048))
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -167,44 +168,60 @@ impl<'a> PhotoServer<'a> {
         let url = url_escape::decode(url).into_owned();
         let url = self.base_url.join(&url)?;
         println!("{} {}", request.remote_addr().unwrap().ip(), url);
-        let params = Params(url.query_pairs().map(
+        let params = Params::new(&url.query_pairs().map(
             |(key, value)| (key.into_owned(), value.into_owned())
-        ).collect());
+        ).collect())?;
         let mut path = url.path_segments().unwrap();
-        let dir_name = path.next().ok_or(HttpError::Invalid)?;
+        let dir_name = Path::new(path.next().ok_or(HttpError::Invalid)?);
         if let Some(leaf_name) = path.next() {
-            if leaf_name.ends_with(".JPG") {
-                self.rescale(leaf_name, &params)
-            } else if leaf_name.ends_with(".JPG.html") {
-                self.frame(leaf_name, &params)
-            } else if leaf_name.ends_with(".JPG.thumb") {
-                self.thumb(leaf_name, &params)
+            let leaf_name = Path::new(leaf_name);
+            if let Some(extension) = leaf_name.extension() {
+                if extension == "JPG" {
+                    if params.w.is_none() && params.h.is_none() {
+                        self.jpeg(dir_name, leaf_name, &params)
+                    } else {
+                        self.rescale(dir_name, leaf_name, &params)
+                    }
+                } else if extension == "html" {
+                    self.frame(dir_name, &leaf_name.with_extension(""), &params)
+                } else if extension == "thumb" {
+                    self.thumb(dir_name, &leaf_name.with_extension(""), &params)
+                } else {
+                    println!("Invalid URL: {:?}", url);
+                    Err(HttpError::Invalid)
+                }
             } else {
                 println!("Not found: {:?}", leaf_name);
                 Err(HttpError::NotFound)
             }
         } else {
-            self.index(&params)
+            self.index(dir_name, &params)
         }
     }
 
     /// Show thumbnails for all photos in a directory.
-    pub fn index(&self, params: &Params) -> Result<HttpOkay, HttpError> {
+    pub fn index(&self, dir_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
         Err(HttpError::Invalid)
     }
 
+    /// Serve a JPEG file directly.
+    pub fn jpeg(&self, dir_name: &Path, leaf_name: &Path, _params: &Params) -> Result<HttpOkay, HttpError> {
+        let jpeg_name = self.document_root.join(dir_name).join(leaf_name);
+        Ok(HttpOkay::File(File::open(jpeg_name)?))
+    }
+
     /// Serve a resized JPEG file.
-    pub fn rescale(&self, leaf_name: &str, params: &Params) -> Result<HttpOkay, HttpError> {
+    pub fn rescale(&self, dir_name: &Path, leaf_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
         Err(HttpError::Invalid)
     }
     
     /// Show an HTML frame around a single photo.
-    pub fn frame(&self, leaf_name: &str, params: &Params) -> Result<HttpOkay, HttpError> {
+    pub fn frame(&self, dir_name: &Path, leaf_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
         Err(HttpError::Invalid)
     }
 
     /// Serve a JPEG thumbnail.
-    pub fn thumb(&self, leaf_name: &str, params: &Params) -> Result<HttpOkay, HttpError> {
+    pub fn thumb(&self, dir_name: &Path, leaf_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
         Err(HttpError::Invalid)
     }
 }
