@@ -50,42 +50,32 @@ impl_from_for_error!(image::ImageError);
 
 // ----------------------------------------------------------------------------
 
-/// Parse an optional str.
-fn parse_optional<T: FromStr>(s: Option<&String>) -> Result<Option<T>, HttpError>
-where HttpError: From<<T as FromStr>::Err> {
-    if let Some(s) = s {
-        Ok(Some(s.parse::<T>()?))
-    } else {
-        Ok(None)
-    }
-}
-
 /// Information about a request.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct Params {
+    /// The user-requested width, if any.
     pub w: Option<u32>,
+
+    /// The user-requested height, if any.
     pub h: Option<u32>,
 }
 
 impl Params {
-    fn new(params: &HashMap<String, String>) -> Result<Self, HttpError> {
-        Ok(Self {
-            w: parse_optional(params.get("w"))?,
-            h: parse_optional(params.get("h"))?,
-        })
+    /// Parse query parameters.
+    fn new(params: &HashMap<String, String>) -> Self {
+        let parse_u32 = |key: &'static str| params.get(key).and_then(|s| s.trim().parse::<u32>().ok());
+        Self {w: parse_u32("w"), h: parse_u32("h")}
     }
 
+    /// Generate query parameters.
     fn to_str(&self) -> String {
         let mut ret = Vec::new();
-        if let Some(w) = self.w {
-            ret.push(format!("w={}", w));
-        }
-        if let Some(h) = self.h {
-            ret.push(format!("h={}", h));
-        }
+        if let Some(w) = self.w { ret.push(format!("w={}", w)); }
+        if let Some(h) = self.h { ret.push(format!("h={}", h)); }
         ret.join("&")
     }
 
+    /// Returns `(w, h)` with sensible defaults and maxima.
     fn get_dimensions(&self) -> (u32, u32) {
         (self.w.unwrap_or(800).min(2048), self.h.unwrap_or(600).min(2048))
     }
@@ -171,13 +161,13 @@ impl<'a> PhotoServer<'a> {
         println!("{} {}", request.remote_addr().unwrap().ip(), url);
         let params = Params::new(&url.query_pairs().map(
             |(key, value)| (key.into_owned(), value.into_owned())
-        ).collect())?;
+        ).collect());
         let mut path = url.path_segments().unwrap();
         let dir_name = Path::new(path.next().ok_or(HttpError::Invalid)?);
         if let Some(leaf_name) = path.next() {
             let leaf_name = Path::new(leaf_name);
             if let Some(extension) = leaf_name.extension() {
-                if extension == "JPG" {
+                if extension == "jpg" || extension == "JPG" {
                     if params.w.is_none() && params.h.is_none() {
                         self.jpeg(dir_name, leaf_name, &params)
                     } else {
@@ -202,6 +192,7 @@ impl<'a> PhotoServer<'a> {
 
     /// Show thumbnails for all photos in a directory.
     pub fn index(&self, dir_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
+        println!("index()");
         Err(HttpError::Invalid)
     }
 
@@ -224,11 +215,13 @@ impl<'a> PhotoServer<'a> {
     
     /// Show an HTML frame around a single photo.
     pub fn frame(&self, dir_name: &Path, leaf_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
+        println!("frame()");
         Err(HttpError::Invalid)
     }
 
     /// Serve a JPEG thumbnail.
     pub fn thumb(&self, dir_name: &Path, leaf_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
+        println!("thumb()");
         Err(HttpError::Invalid)
     }
 }
