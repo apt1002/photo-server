@@ -1,5 +1,6 @@
 use std::collections::{HashMap};
 use std::error::{Error};
+use std::ffi::{OsStr};
 use std::fs::{File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -8,10 +9,19 @@ use html_escape::{encode_text as escape};
 use tiny_http::{Method, Request, Response, Header};
 use url::{Url};
 
-/// Replaces non-unicode characters with &FFFD, then escapes for HTML.
-fn escape_path(path: &Path) -> String {
-    // FIXME: URL-escape, and don't lose invalid UTF-8 sequences.
-    escape(&path.to_string_lossy()).into_owned()
+/// If `s` only contains alphanumeric characters and characters in `_.,-`,
+/// returns it unchanged.
+fn validate_name(s: &OsStr) -> Result<&str, HttpError> {
+    for b in s.as_encoded_bytes() {
+        match b {
+            b'0' .. b'9' => {},
+            b'A' .. b'Z' => {},
+            b'a' .. b'z' => {},
+            b'_' | b'.' | b',' | b'-' => {}
+            _ => { return Err(HttpError::Invalid); }
+        }
+    }
+    Ok(s.to_str().unwrap())
 }
 
 // ----------------------------------------------------------------------------
@@ -119,7 +129,7 @@ impl Album {
         let mut others: Vec<PathBuf> = Vec::new();
         for dir_entry in dir_name.read_dir()? {
             if let Some(path) = dir_entry?.path().file_name() {
-                let path = PathBuf::from(path);
+                let path = PathBuf::from(validate_name(path)?);
                 if path.as_os_str() == "README.txt" {
                     readme = Some(path);
                 } else {
@@ -218,12 +228,16 @@ impl<'a> PhotoServer<'a> {
         println!("{} {}", request.remote_addr().unwrap().ip(), url);
         // Parse the query parameters.
         let params = Params::new(&url.query_pairs().map(
-            |(key, value)| (key.into_owned(), value.into_owned())
+            |(key, value)| (
+                url_escape::decode(key.as_ref()).into_owned(),
+                url_escape::decode(value.as_ref()).into_owned(),
+            )
         ).collect());
         // Parse the path segments.
-        let mut path_segments: Vec<PathBuf> = url.path_segments().unwrap().map(
-            |s| PathBuf::from(url_escape::decode(s).into_owned())
-        ).collect();
+        let mut path_segments = Vec::new();
+        for s in url.path_segments().unwrap() {
+            path_segments.push(PathBuf::from(validate_name(s.as_ref())?));
+        }
         if let Some(last) = path_segments.last() {
             if last.as_os_str() == "" { path_segments.pop(); }
         }
@@ -285,12 +299,11 @@ impl<'a> PhotoServer<'a> {
         };
         let jpegs: Vec<_> = album.jpegs.iter().map(|name| format!(
             r#"<a href="{name}.html{dimensions}"><img src="{name}.thumb"/></a>"#,
-            name = escape_path(&name),
-            dimensions = dimensions,
+            name = name.display(),
         )).collect();
         let others: Vec<_> = album.others.iter().map(|name| format!(
             r#"<a href="{name}">{name}</a>"#,
-            name = escape_path(&name),
+            name = name.display(),
         )).collect();
         Ok(HttpOkay::Html(format!(
 r#"<html>
@@ -322,16 +335,9 @@ r#"<html>
     /// Show an HTML frame around a single photo.
     pub fn frame(&self, dir_name: &Path, leaf_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
         let dimensions = params.get_dimensions();
-        // Enumerate the files in `jpeg_dir` and compute `prev` and `next` links.
-        let jpeg_dir = self.document_root.join(dir_name);
-        let mut paths: Vec<PathBuf> = Vec::new();
-        for dir_entry in jpeg_dir.read_dir()? {
-            if let Some(path) = dir_entry?.path().file_name() {
-                if let Some(extension) = Path::new(path).extension() {
-                    if extension == "JPG" || extension == "jpg" { paths.push(path.into()); }
-                }
-            }
-        }
+        // Enumerate the JPEG files in `dir_name` and compute
+        // `prev` and `next` links.
+        let mut paths = Album::new(&self.document_root.join(dir_name))?.jpegs;
         paths.sort();
         let mut previouses: HashMap<&Path, &Path> = HashMap::new();
         let mut nexts: HashMap<&Path, &Path> = HashMap::new();
@@ -385,11 +391,11 @@ r#"<html>
 </form>
 </body>
 </html>"#,
-            dir_name = escape_path(&dir_name),
-            base_name = escape_path(&leaf_name.with_extension("")),
-            leaf_name = escape_path(&leaf_name),
-            previous = escape_path(previouses.get(leaf_name).ok_or(HttpError::NotFound)?),
-            next = escape_path(nexts.get(leaf_name).ok_or(HttpError::NotFound)?),
+            dir_name = dir_name.display(),
+            base_name = leaf_name.with_extension("").display(),
+            leaf_name = leaf_name.display(),
+            previous = previouses.get(leaf_name).ok_or(HttpError::NotFound)?.display(),
+            next = nexts.get(leaf_name).ok_or(HttpError::NotFound)?.display(),
             dimensions = dimensions,
             w = dimensions.w,
             h = dimensions.h,
