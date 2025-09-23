@@ -10,6 +10,7 @@ use url::{Url};
 
 /// Replaces non-unicode characters with &FFFD, then escapes for HTML.
 fn escape_path(path: &Path) -> String {
+    // FIXME: URL-escape, and don't lose invalid UTF-8 sequences.
     escape(&path.to_string_lossy()).into_owned()
 }
 
@@ -232,27 +233,30 @@ impl<'a> PhotoServer<'a> {
         if let Some(leaf_name) = &path_iter.next() {
             if let Some(extension) = leaf_name.extension() {
                 if extension == "jpg" || extension == "JPG" {
-                    if params.w.is_none() && params.h.is_none() {
-                        // TODO: Treat as any other static file.
-                        self.jpeg(dir_name, leaf_name, &params)
-                    } else {
-                        self.rescale(dir_name, leaf_name, &params)
+                    if params.w.is_some() || params.h.is_some() {
+                        return self.rescale(dir_name, leaf_name, &params);
                     }
                 } else if extension == "html" {
-                    self.frame(dir_name, &leaf_name.with_extension(""), &params)
+                    let leaf_name = leaf_name.with_extension("");
+                    if let Some(extension) = leaf_name.extension() {
+                        if extension == "jpg" || extension == "JPG" {
+                            return self.frame(dir_name, &leaf_name, &params);
+                        }
+                    }
                 } else if extension == "thumb" {
-                    self.thumb(dir_name, &leaf_name.with_extension(""), &params)
-                } else {
-                    println!("Invalid URL: {:?}", url);
-                    Err(HttpError::Invalid)
+                    let leaf_name = leaf_name.with_extension("");
+                    if let Some(extension) = leaf_name.extension() {
+                        if extension == "jpg" || extension == "JPG" {
+                            return self.thumb(dir_name, &leaf_name, &params);
+                        }
+                    }
                 }
-            } else {
-                // FIXME: Serve the static file.
-                println!("Not found: {:?}", leaf_name);
-                Err(HttpError::NotFound)
             }
+            // Any other `leaf_name` is a static file.
+            let name = self.document_root.join(dir_name).join(leaf_name);
+            return Ok(HttpOkay::File(File::open(&name)?));
         } else {
-            self.index(dir_name, &params)
+            return self.index(dir_name, &params);
         }
     }
 
@@ -307,12 +311,6 @@ r#"<html>
             jpegs = jpegs.join("\n  "),
             others = others.join("\n  "),
         )))
-    }
-
-    /// Serve a JPEG file directly.
-    pub fn jpeg(&self, dir_name: &Path, leaf_name: &Path, _params: &Params) -> Result<HttpOkay, HttpError> {
-        let jpeg_name = self.document_root.join(dir_name).join(leaf_name);
-        Ok(HttpOkay::File(File::open(&jpeg_name)?))
     }
 
     /// Serve a resized JPEG file.
