@@ -1,7 +1,7 @@
 use std::collections::{HashMap};
 use std::error::{Error};
 use std::fs::{File};
-use std::io::{Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use html_escape::{encode_text as escape};
@@ -103,6 +103,43 @@ impl Params {
 
 // ----------------------------------------------------------------------------
 
+/// Contents of an album directory.
+#[derive(Debug, Clone)]
+struct Album {
+    readme: Option<PathBuf>,
+    jpegs: Vec<PathBuf>,
+    others: Vec<PathBuf>,
+}
+
+impl Album {
+    fn new(dir_name: &Path) -> Result<Self, HttpError> {
+        let mut readme: Option<PathBuf> = None;
+        let mut jpegs: Vec<PathBuf> = Vec::new();
+        let mut others: Vec<PathBuf> = Vec::new();
+        for dir_entry in dir_name.read_dir()? {
+            if let Some(path) = dir_entry?.path().file_name() {
+                let path = PathBuf::from(path);
+                if path.as_os_str() == "README.txt" {
+                    readme = Some(path);
+                } else {
+                    if let Some(extension) = path.extension() {
+                        if extension == "JPG" || extension == "jpg" {
+                            jpegs.push(path);
+                        } else {
+                            others.push(path);
+                        }
+                    }
+                }
+            }
+        }
+        jpegs.sort();
+        others.sort();
+        Ok(Self {readme, jpegs, others})
+    }
+}
+
+// ----------------------------------------------------------------------------
+
 struct PhotoServer<'a> {
     /// Web server.
     pub server: tiny_http::Server,
@@ -196,6 +233,7 @@ impl<'a> PhotoServer<'a> {
             if let Some(extension) = leaf_name.extension() {
                 if extension == "jpg" || extension == "JPG" {
                     if params.w.is_none() && params.h.is_none() {
+                        // TODO: Treat as any other static file.
                         self.jpeg(dir_name, leaf_name, &params)
                     } else {
                         self.rescale(dir_name, leaf_name, &params)
@@ -209,6 +247,7 @@ impl<'a> PhotoServer<'a> {
                     Err(HttpError::Invalid)
                 }
             } else {
+                // FIXME: Serve the static file.
                 println!("Not found: {:?}", leaf_name);
                 Err(HttpError::NotFound)
             }
@@ -227,9 +266,47 @@ impl<'a> PhotoServer<'a> {
     }
 
     /// Show thumbnails for all photos in a directory.
-    pub fn index(&self, _dir_name: &Path, _params: &Params) -> Result<HttpOkay, HttpError> {
-        println!("index()");
-        Err(HttpError::Invalid)
+    pub fn index(&self, dir_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
+        let dimensions = params.get_dimensions();
+        let album = Album::new(&self.document_root.join(dir_name))?;
+        let readme = if let Some(name) = &album.readme {
+            let mut text = String::new();
+            File::open(self.document_root.join(dir_name).join(name))?.read_to_string(&mut text)?;
+            format!(
+                "<pre>{text}</pre>",
+                text = escape(&text),
+            )
+        } else {
+            String::new()
+        };
+        let jpegs: Vec<_> = album.jpegs.iter().map(|name| format!(
+            r#"<a href="{name}.html{dimensions}"><img src="{name}.thumb"/></a>"#,
+            name = escape_path(&name),
+            dimensions = dimensions,
+        )).collect();
+        let others: Vec<_> = album.others.iter().map(|name| format!(
+            r#"<a href="{name}">{name}</a>"#,
+            name = escape_path(&name),
+        )).collect();
+        Ok(HttpOkay::Html(format!(
+r#"<html>
+ <head>
+  <title>{dir_name}</title>
+ </head>
+ <body>
+  <h2>{dir_name}</h2>
+  <a href="..">Up</a><br/>
+  {readme}
+  {jpegs}
+  <br/>
+  {others}
+ </body>
+</html>"#,
+            dir_name = dir_name.display(),
+            readme = readme,
+            jpegs = jpegs.join("\n  "),
+            others = others.join("\n  "),
+        )))
     }
 
     /// Serve a JPEG file directly.
