@@ -1,12 +1,17 @@
 use std::collections::{HashMap};
 use std::error::{Error};
-// use std::io::{Write};
 use std::fs::{File};
 use std::io::{Write};
 use std::path::{Path, PathBuf};
 
+use html_escape::{encode_text as escape};
 use tiny_http::{Method, Request, Response, Header};
 use url::{Url};
+
+/// Replaces non-unicode characters with &FFFD, then escapes for HTML.
+fn escape_path(path: &Path) -> String {
+    escape(&path.to_string_lossy()).into_owned()
+}
 
 // ----------------------------------------------------------------------------
 
@@ -171,16 +176,23 @@ impl<'a> PhotoServer<'a> {
         }
 
         let url = request.url();
-        let url = url_escape::decode(url).into_owned();
         let url = self.base_url.join(&url)?;
         println!("{} {}", request.remote_addr().unwrap().ip(), url);
+        // Parse the query parameters.
         let params = Params::new(&url.query_pairs().map(
             |(key, value)| (key.into_owned(), value.into_owned())
         ).collect());
-        let mut path = url.path_segments().unwrap();
-        let dir_name = Path::new(path.next().ok_or(HttpError::Invalid)?);
-        if let Some(leaf_name) = path.next() {
-            let leaf_name = Path::new(leaf_name);
+        // Parse the path segments.
+        let mut path_segments: Vec<PathBuf> = url.path_segments().unwrap().map(
+            |s| PathBuf::from(url_escape::decode(s).into_owned())
+        ).collect();
+        if let Some(last) = path_segments.last() {
+            if last.as_os_str() == "" { path_segments.pop(); }
+        }
+        // Dispatch to the appropriate method.
+        let mut path_iter = path_segments.into_iter();
+        let dir_name = &path_iter.next().ok_or(HttpError::Invalid)?;
+        if let Some(leaf_name) = &path_iter.next() {
             if let Some(extension) = leaf_name.extension() {
                 if extension == "jpg" || extension == "JPG" {
                     if params.w.is_none() && params.h.is_none() {
@@ -298,11 +310,11 @@ r#"<html>
 </form>
 </body>
 </html>"#,
-            dir_name = dir_name.display(),
-            base_name = leaf_name.with_extension("").display(),
-            leaf_name = leaf_name.display(),
-            previous = previouses.get(leaf_name).ok_or(HttpError::NotFound)?.display(),
-            next = nexts.get(leaf_name).ok_or(HttpError::NotFound)?.display(),
+            dir_name = escape_path(&dir_name),
+            base_name = escape_path(&leaf_name.with_extension("")),
+            leaf_name = escape_path(&leaf_name),
+            previous = escape_path(previouses.get(leaf_name).ok_or(HttpError::NotFound)?),
+            next = escape_path(nexts.get(leaf_name).ok_or(HttpError::NotFound)?),
             dimensions = dimensions,
             w = dimensions.w,
             h = dimensions.h,
