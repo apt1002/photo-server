@@ -1,6 +1,7 @@
+use std::{env, fmt};
 use std::collections::{HashMap};
 use std::error::{Error};
-use std::ffi::{OsStr};
+use std::ffi::{OsStr, OsString};
 use std::fs::{File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -9,16 +10,30 @@ use html_escape::{encode_text as escape};
 use tiny_http::{Method, Request, Response, Header};
 use url::{Url};
 
-/// If `s` only contains alphanumeric characters and characters in `_.,-`,
+// ----------------------------------------------------------------------------
+
+/// `Error` returned by `validate_name()` if it doesn't like the filename.
+#[derive(Debug)]
+pub struct DubiousFilename(OsString);
+
+impl fmt::Display for DubiousFilename {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Filename {:?} contains unusual characters; only letters, digits and \"_-.\" are allowed", self.0)
+    }
+}
+
+impl Error for DubiousFilename {}
+
+/// If `s` only contains alphanumeric characters and characters in `_-.`,
 /// returns it unchanged.
-fn validate_name(s: &OsStr) -> Result<&str, HttpError> {
+fn validate_name(s: &OsStr) -> Result<&str, DubiousFilename> {
     for b in s.as_encoded_bytes() {
         match b {
             b'0' .. b'9' => {},
             b'A' .. b'Z' => {},
             b'a' .. b'z' => {},
-            b'_' | b'.' | b',' | b'-' => {}
-            _ => { return Err(HttpError::Invalid); }
+            b'_' | b'.' | b'-' => {}
+            _ => { return Err(DubiousFilename(s.to_owned())); }
         }
     }
     Ok(s.to_str().unwrap())
@@ -42,8 +57,8 @@ pub enum HttpError {
     Error(Box<dyn Error>),
 }
 
-impl std::fmt::Display for HttpError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl fmt::Display for HttpError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:?}", self)
     }
 }
@@ -63,6 +78,7 @@ impl_from_for_error!(std::num::ParseIntError);
 impl_from_for_error!(std::char::ParseCharError);
 impl_from_for_error!(url::ParseError);
 impl_from_for_error!(image::ImageError);
+impl_from_for_error!(DubiousFilename);
 
 // ----------------------------------------------------------------------------
 
@@ -76,8 +92,8 @@ struct Dimensions {
     pub h: u32,
 }
 
-impl std::fmt::Display for Dimensions {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl fmt::Display for Dimensions {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "?w={}&h={}", self.w, self.h)
     }
 }
@@ -424,11 +440,11 @@ const DOCUMENT_ROOT: &'static str = "./document_root";
 const THUMBNAIL_ROOT: &'static str = "./thumbnail_root";
 
 fn main() {
-    let server_address = std::env::var("PHOTO_SERVER_ADDRESS").unwrap_or_else(|_| SERVER_ADDRESS.to_owned());
+    let server_address = env::var("PHOTO_SERVER_ADDRESS").unwrap_or_else(|_| SERVER_ADDRESS.to_owned());
     let server_url = format!("http://{}", server_address);
-    let base_url = std::env::var("PHOTO_SERVER_BASE_URL").unwrap_or_else(|_| server_url.clone());
-    let document_root = std::env::var("PHOTO_SERVER_DOCUMENT_ROOT").unwrap_or_else(|_| DOCUMENT_ROOT.to_owned());
-    let thumbnail_root = std::env::var("PHOTO_SERVER_THUMBNAIL_ROOT").unwrap_or_else(|_| THUMBNAIL_ROOT.to_owned());
+    let base_url = env::var("PHOTO_SERVER_BASE_URL").unwrap_or_else(|_| server_url.clone());
+    let document_root = env::var("PHOTO_SERVER_DOCUMENT_ROOT").unwrap_or_else(|_| DOCUMENT_ROOT.to_owned());
+    let thumbnail_root = env::var("PHOTO_SERVER_THUMBNAIL_ROOT").unwrap_or_else(|_| THUMBNAIL_ROOT.to_owned());
     let server = PhotoServer::new(&server_address, &base_url, &document_root, &thumbnail_root);
     println!("Listening on {}", server_url);
     server.handle_requests();
