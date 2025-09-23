@@ -178,102 +178,6 @@ impl<'a> PhotoServer<'a> {
         server
     }
 
-    /// Construct an HTTP header.
-    fn header(key: &str, value: &str) -> tiny_http::Header {
-        let key_b = key.as_bytes();
-        let val_b = value.as_bytes();
-        Header::from_bytes(
-            key_b, val_b)
-            .unwrap() // depends only on data fixed at compile time
-    }
-
-    /// Handle requests for ever.
-    fn handle_requests(&self) {
-        for request in self.server.incoming_requests() {
-            match self.handle_request(&request) {
-                Ok(HttpOkay::File(file)) => {
-                    request.respond(Response::from_file(file))
-                },
-                Ok(HttpOkay::Html(text)) => {
-                    let header = Self::header("Content-Type", "text/html");
-                    request.respond(Response::from_string(text).with_header(header))
-                },
-                Ok(HttpOkay::Jpeg(data)) => {
-                    let header = Self::header("Content-Type", "image/jpeg");
-                    request.respond(Response::from_data(data).with_header(header))
-                },
-                Err(HttpError::Invalid) => {
-                    request.respond(Response::from_string("Invalid request").with_status_code(400))
-                },
-                Err(HttpError::NotFound) => {
-                    request.respond(Response::from_string("Not found").with_status_code(404))
-                },
-                Err(e) => {
-                    println!("Error: {}", e);
-                    request.respond(Response::from_string("Internal error").with_status_code(500))
-                },
-            }.unwrap_or_else(|e2| println!("IO Error: {}", e2));
-        }
-    }
-
-    /// Handle a single request.
-    fn handle_request(&self, request: &Request) -> Result<HttpOkay, HttpError> {
-        match request.method() {
-            Method::Get => {},
-            _ => return Err(HttpError::Invalid),
-        }
-
-        let url = request.url();
-        let url = self.base_url.join(&url)?;
-        println!("{} {}", request.remote_addr().unwrap().ip(), url);
-        // Parse the query parameters.
-        let params = Params::new(&url.query_pairs().map(
-            |(key, value)| (
-                url_escape::decode(key.as_ref()).into_owned(),
-                url_escape::decode(value.as_ref()).into_owned(),
-            )
-        ).collect());
-        // Parse the path segments.
-        let mut path_segments = Vec::new();
-        for s in url.path_segments().unwrap() {
-            path_segments.push(PathBuf::from(validate_name(s.as_ref())?));
-        }
-        if let Some(last) = path_segments.last() {
-            if last.as_os_str() == "" { path_segments.pop(); }
-        }
-        // Dispatch to the appropriate method.
-        let mut path_iter = path_segments.into_iter();
-        let dir_name = &path_iter.next().ok_or(HttpError::Invalid)?;
-        if let Some(leaf_name) = &path_iter.next() {
-            if let Some(extension) = leaf_name.extension() {
-                if extension == "jpg" || extension == "JPG" {
-                    if params.w.is_some() || params.h.is_some() {
-                        return self.rescale(dir_name, leaf_name, &params);
-                    }
-                } else if extension == "html" {
-                    let leaf_name = leaf_name.with_extension("");
-                    if let Some(extension) = leaf_name.extension() {
-                        if extension == "jpg" || extension == "JPG" {
-                            return self.frame(dir_name, &leaf_name, &params);
-                        }
-                    }
-                } else if extension == "thumb" {
-                    let leaf_name = leaf_name.with_extension("");
-                    if let Some(extension) = leaf_name.extension() {
-                        if extension == "jpg" || extension == "JPG" {
-                            return self.thumb(dir_name, &leaf_name, &params);
-                        }
-                    }
-                }
-            }
-            // Any other `leaf_name` is a static file.
-            let name = self.document_root.join(dir_name).join(leaf_name);
-            return Ok(HttpOkay::File(File::open(&name)?));
-        } else {
-            return self.index(dir_name, &params);
-        }
-    }
-
     /// Load `jpeg_name`, resize it, and encode it as a new JPEG file.
     fn resize_jpeg(jpeg_name: &Path, d: Dimensions) -> Result<Vec<u8>, HttpError> {
         let image = image::open(jpeg_name)?;
@@ -413,6 +317,102 @@ r#"<html>
             file.write(&Self::resize_jpeg(&jpeg_name, Dimensions {w: 128, h: 96})?)?;
         }
         Ok(HttpOkay::File(File::open(&thumbnail_name)?))
+    }
+
+    /// Handle a single request.
+    fn handle_request(&self, request: &Request) -> Result<HttpOkay, HttpError> {
+        match request.method() {
+            Method::Get => {},
+            _ => return Err(HttpError::Invalid),
+        }
+
+        let url = request.url();
+        let url = self.base_url.join(&url)?;
+        println!("{} {}", request.remote_addr().unwrap().ip(), url);
+        // Parse the query parameters.
+        let params = Params::new(&url.query_pairs().map(
+            |(key, value)| (
+                url_escape::decode(key.as_ref()).into_owned(),
+                            url_escape::decode(value.as_ref()).into_owned(),
+            )
+        ).collect());
+        // Parse the path segments.
+        let mut path_segments = Vec::new();
+        for s in url.path_segments().unwrap() {
+            path_segments.push(PathBuf::from(validate_name(s.as_ref())?));
+        }
+        if let Some(last) = path_segments.last() {
+            if last.as_os_str() == "" { path_segments.pop(); }
+        }
+        // Dispatch to the appropriate method.
+        let mut path_iter = path_segments.into_iter();
+        let dir_name = &path_iter.next().ok_or(HttpError::Invalid)?;
+        if let Some(leaf_name) = &path_iter.next() {
+            if let Some(extension) = leaf_name.extension() {
+                if extension == "jpg" || extension == "JPG" {
+                    if params.w.is_some() || params.h.is_some() {
+                        return self.rescale(dir_name, leaf_name, &params);
+                    }
+                } else if extension == "html" {
+                    let leaf_name = leaf_name.with_extension("");
+                    if let Some(extension) = leaf_name.extension() {
+                        if extension == "jpg" || extension == "JPG" {
+                            return self.frame(dir_name, &leaf_name, &params);
+                        }
+                    }
+                } else if extension == "thumb" {
+                    let leaf_name = leaf_name.with_extension("");
+                    if let Some(extension) = leaf_name.extension() {
+                        if extension == "jpg" || extension == "JPG" {
+                            return self.thumb(dir_name, &leaf_name, &params);
+                        }
+                    }
+                }
+            }
+            // Any other `leaf_name` is a static file.
+            let name = self.document_root.join(dir_name).join(leaf_name);
+            return Ok(HttpOkay::File(File::open(&name)?));
+        } else {
+            return self.index(dir_name, &params);
+        }
+    }
+
+    /// Construct an HTTP header.
+    fn header(key: &str, value: &str) -> tiny_http::Header {
+        let key_b = key.as_bytes();
+        let val_b = value.as_bytes();
+        Header::from_bytes(
+            key_b, val_b)
+        .unwrap() // depends only on data fixed at compile time
+    }
+
+    /// Handle requests for ever.
+    fn handle_requests(&self) {
+        for request in self.server.incoming_requests() {
+            match self.handle_request(&request) {
+                Ok(HttpOkay::File(file)) => {
+                    request.respond(Response::from_file(file))
+                },
+                Ok(HttpOkay::Html(text)) => {
+                    let header = Self::header("Content-Type", "text/html");
+                    request.respond(Response::from_string(text).with_header(header))
+                },
+                Ok(HttpOkay::Jpeg(data)) => {
+                    let header = Self::header("Content-Type", "image/jpeg");
+                    request.respond(Response::from_data(data).with_header(header))
+                },
+                Err(HttpError::Invalid) => {
+                    request.respond(Response::from_string("Invalid request").with_status_code(400))
+                },
+                Err(HttpError::NotFound) => {
+                    request.respond(Response::from_string("Not found").with_status_code(404))
+                },
+                Err(e) => {
+                    println!("Error: {}", e);
+                    request.respond(Response::from_string("Internal error").with_status_code(500))
+                },
+            }.unwrap_or_else(|e2| println!("IO Error: {}", e2));
+        }
     }
 }
 
