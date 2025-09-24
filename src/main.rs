@@ -359,29 +359,12 @@ r#"<html>
     }
 
     /// Handle a single request.
-    fn handle_request(&self, request: &Request) -> Result<HttpOkay, HttpError> {
-        match request.method() {
-            Method::Get => {},
-            _ => return Err(HttpError::Invalid),
-        }
-
-        let absolute_url = self.base_url.join(request.url())?;
-        println!("{} {}", request.remote_addr().unwrap().ip(), absolute_url);
-        // Parse the query parameters.
-        let params: Params = absolute_url.query_pairs().map(
-            |(key, value)| (
-                url_escape::decode(key.as_ref()).into_owned(),
-                url_escape::decode(value.as_ref()).into_owned(),
-            )
-        ).collect();
-        // Parse the path segments.
-        // TODO: Abstract as `enum Route`?
-        let mut path: Vec<String> = absolute_url.path_segments().ok_or(HttpError::Invalid)?.map(
-            |s| url_escape::decode(s).into_owned()
-        ).collect();
-        if let Some(last) = path.last() {
-            if "" == last { path.pop(); }
-        }
+    fn handle_get(
+        &self,
+        _absolute_url: &Url,
+        path: &[String],
+        params: &Params,
+    ) -> Result<HttpOkay, HttpError> {
         // Dispatch to the appropriate method.
         let mut path_iter = path.into_iter();
         let dir_name = &path_iter.next().ok_or(HttpError::Invalid)?;
@@ -407,6 +390,31 @@ r#"<html>
         }
     }
 
+    fn handle_request(&self, request: &mut Request) -> Result<HttpOkay, HttpError> {
+        let absolute_url = self.base_url.join(request.url())?;
+        println!("{} {}", request.remote_addr().unwrap().ip(), absolute_url);
+        // Parse the query parameters.
+        let params = absolute_url.query_pairs().map(
+            |(key, value)| (
+                url_escape::decode(key.as_ref()).into_owned(),
+                url_escape::decode(value.as_ref()).into_owned(),
+            )
+        ).collect();
+        // Parse the path segments.
+        // TODO: Abstract as `enum Route`?
+        let mut path: Vec<String> = absolute_url.path_segments().ok_or(HttpError::Invalid)?.map(
+            |s| url_escape::decode(s).into_owned()
+        ).collect();
+        if let Some(last) = path.last() {
+            if "" == last { path.pop(); }
+        }
+        // Dispatch based on HTTP method.
+        match request.method() {
+            Method::Get => self.handle_get(&absolute_url, &path, &params),
+            _ => Err(HttpError::Invalid),
+        }
+    }
+
     /// Construct an HTTP header.
     fn header(key: &str, value: &str) -> tiny_http::Header {
         Header::from_bytes(
@@ -417,8 +425,8 @@ r#"<html>
 
     /// Handle requests for ever.
     fn handle_requests(&self) {
-        for request in self.server.incoming_requests() {
-            match self.handle_request(&request) {
+        for mut request in self.server.incoming_requests() {
+            match self.handle_request(&mut request) {
                 Ok(HttpOkay::File(file)) => {
                     request.respond(Response::from_file(file))
                 },
