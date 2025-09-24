@@ -1,5 +1,4 @@
 use std::{env, fmt};
-use std::collections::{HashMap};
 use std::error::{Error};
 use std::ffi::{OsStr, OsString};
 use std::fs::{File};
@@ -178,6 +177,23 @@ impl Album {
         ret.others.sort();
         Ok(ret)
     }
+
+    /// Given one of the filenames in `self.jpegs`, returns the previous and
+    /// next such filename.
+    fn previous_next(&self, jpeg_name: &str) -> Option<(&str, &str)> {
+        if let Some(prev) = self.jpegs.last() {
+            let mut prev: &str = &prev;
+            let mut iter = self.jpegs.iter();
+            while let Some(p) = iter.next() {
+                if p == jpeg_name {
+                    let next: &str = iter.next().unwrap_or(self.jpegs.first().unwrap());
+                    return Some((prev, next));
+                }
+                prev = p;
+            }
+        }
+        None
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -271,17 +287,9 @@ r#"<html>
     pub fn frame(&self, dir_name: &str, leaf_name: &str, params: &Params) -> Result<HttpOkay, HttpError> {
         let dimensions = params.get_dimensions();
         // Enumerate the JPEG files in `dir_name` and compute
-        // `prev` and `next` links.
-        let mut paths = Album::new(&self.document_root.join(dir_name))?.jpegs;
-        paths.sort();
-        let mut previouses: HashMap<&str, &str> = HashMap::new();
-        let mut nexts: HashMap<&str, &str> = HashMap::new();
-        let mut prev = paths.last().ok_or(HttpError::NotFound)?;
-        for p in &paths {
-            previouses.insert(&p, &prev);
-            nexts.insert(&prev, &p);
-            prev = p;
-        }
+        // `previous` and `next` links.
+        let album = Album::new(&self.document_root.join(dir_name))?;
+        let (previous, next) = album.previous_next(leaf_name).ok_or(HttpError::NotFound)?;
         // This substring contains a lot of `{` and `}` characters.
         let stylesheet =
 r#"body {background-color: #000000; color: #FFFFFF}
@@ -329,8 +337,8 @@ r#"<html>
             dir_name = dir_name,
             base_name = remove_extension(leaf_name, "jpg").unwrap(), // Checked by caller.
             leaf_name = leaf_name,
-            previous = previouses.get(leaf_name).ok_or(HttpError::NotFound)?,
-            next = nexts.get(leaf_name).ok_or(HttpError::NotFound)?,
+            previous = previous,
+            next = next,
             dimensions = dimensions,
             w = dimensions.w,
             h = dimensions.h,
