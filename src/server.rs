@@ -89,7 +89,7 @@ impl Error for HttpError {}
 macro_rules! impl_httperror_from {
     ($e:ty) => {
         impl From<$e> for HttpError {
-            fn from(e: $e) -> Self { HttpError::Error(e.into()) }
+            fn from(e: $e) -> Self { Self::new(e) }
         }
     };
 }
