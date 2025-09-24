@@ -1,96 +1,10 @@
 use std::{env, fmt};
-use std::error::{Error};
-use std::ffi::{OsStr, OsString};
 use std::fs::{File};
 use std::io::{Read, Write};
 use std::path::{Path};
 
-use html_escape::{encode_text as escape};
-use tiny_http::{Method, Request, Response, Header};
-use url::{Url};
-
-/// Given `"foo.BAR"` and `"bar"` returns `Some("foo")`.
-fn remove_extension<'f>(filename: &'f str, extension: &str) -> Option<&'f str> {
-    if let Some(index) = filename.len().checked_sub(".".len() + extension.len()) {
-        if let Some((ret, tail)) = filename.split_at_checked(index) {
-            let mut tail = tail.chars();
-            if let Some('.') = tail.next() {
-                if extension.eq_ignore_ascii_case(tail.as_str()) { return Some(ret); }
-            }
-        }
-    }
-    None
-}
-
-// ----------------------------------------------------------------------------
-
-/// `Error` returned by `validate_name()` if it doesn't like the filename.
-#[derive(Debug)]
-pub struct DubiousFilename(OsString);
-
-impl fmt::Display for DubiousFilename {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Filename {:?} contains unusual characters; only letters, digits and \"_-.\" are allowed", self.0)
-    }
-}
-
-impl Error for DubiousFilename {}
-
-/// If `s` only contains alphanumeric characters and characters in `_-.`,
-/// returns it unchanged.
-fn validate_name(s: &OsStr) -> Result<&str, DubiousFilename> {
-    for b in s.as_encoded_bytes() {
-        match b {
-            b'0' .. b'9' => {},
-            b'A' .. b'Z' => {},
-            b'a' .. b'z' => {},
-            b'_' | b'.' | b'-' => {}
-            _ => { return Err(DubiousFilename(s.to_owned())); }
-        }
-    }
-    Ok(s.to_str().unwrap())
-}
-
-// ----------------------------------------------------------------------------
-
-/// A "200 OK" HTTP response.
-#[derive(Debug)]
-pub enum HttpOkay {
-    File(File),
-    Html(String),
-    Jpeg(Vec<u8>),
-}
-
-// An erroneous HTTP response.
-#[derive(Debug)]
-pub enum HttpError {
-    Invalid,
-    NotFound,
-    Error(Box<dyn Error>),
-}
-
-impl fmt::Display for HttpError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl Error for HttpError {}
-
-macro_rules! impl_from_for_error {
-    ($e:ty) => {
-        impl From<$e> for HttpError {
-            fn from(e: $e) -> Self { HttpError::Error(e.into()) }
-        }
-    };
-}
-
-impl_from_for_error!(std::io::Error);
-impl_from_for_error!(std::num::ParseIntError);
-impl_from_for_error!(std::char::ParseCharError);
-impl_from_for_error!(url::ParseError);
-impl_from_for_error!(image::ImageError);
-impl_from_for_error!(DubiousFilename);
+mod server;
+use server::{Handler, HttpOkay, HttpError, html_escape, Url, remove_extension, validate_name};
 
 // ----------------------------------------------------------------------------
 
@@ -199,12 +113,6 @@ impl Album {
 // ----------------------------------------------------------------------------
 
 struct PhotoServer<'a> {
-    /// Web server.
-    pub server: tiny_http::Server,
-
-    /// The external URL of the server.
-    pub base_url: Url,
-
     /// The directory containing the photos.
     pub document_root: &'a Path,
 
@@ -213,24 +121,20 @@ struct PhotoServer<'a> {
 }
 
 impl<'a> PhotoServer<'a> {
-    fn new(addr: &str, base_url: &str, document_root: &'a str, thumbnail_root: &'a str) -> Self {
-        let server = Self {
-            server: tiny_http::Server::http(addr)
-                .expect("Could not create the web server"),
-            base_url: url::Url::parse(base_url)
-                .expect("Could not parse the base URL"),
+    fn new(document_root: &'a str, thumbnail_root: &'a str) -> Self {
+        Self {
             document_root: Path::new(document_root),
             thumbnail_root: Path::new(thumbnail_root),
-        };
-        server
+        }
     }
 
     /// Load `jpeg_name`, resize it, and encode it as a new JPEG file.
     fn resize_jpeg(jpeg_name: &Path, d: Dimensions) -> Result<Vec<u8>, HttpError> {
-        let image = image::open(jpeg_name)?;
+        let image = image::open(jpeg_name).map_err(HttpError::new)?;
         let image = image.resize(d.w, d.h, image::imageops::FilterType::Lanczos3);
         let mut ret = Vec::<u8>::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut ret, 85).encode_image(&image)?;
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut ret, 85);
+        encoder.encode_image(&image).map_err(HttpError::new)?;
         Ok(ret)
     }
 
@@ -243,7 +147,7 @@ impl<'a> PhotoServer<'a> {
             File::open(self.document_root.join(dir_name).join(name))?.read_to_string(&mut text)?;
             format!(
                 "<pre>{text}</pre>",
-                text = escape(&text),
+                text = html_escape(&text),
             )
         } else {
             String::new()
@@ -357,13 +261,17 @@ r#"<html>
         }
         Ok(HttpOkay::File(File::open(&thumbnail_name)?))
     }
+}
+
+impl<'a> Handler for PhotoServer<'a> {
+    type Params = Params;
 
     /// Handle a single request.
     fn handle_get(
         &self,
-        _absolute_url: &Url,
-        path: &[String],
-        params: &Params,
+        _absolute_url: Url,
+        path: Vec<String>,
+        params: Self::Params,
     ) -> Result<HttpOkay, HttpError> {
         // Dispatch to the appropriate method.
         let mut path_iter = path.into_iter();
@@ -389,84 +297,27 @@ r#"<html>
             return self.index(dir_name, &params);
         }
     }
-
-    fn handle_request(&self, request: &mut Request) -> Result<HttpOkay, HttpError> {
-        let absolute_url = self.base_url.join(request.url())?;
-        println!("{} {}", request.remote_addr().unwrap().ip(), absolute_url);
-        // Parse the query parameters.
-        let params = absolute_url.query_pairs().map(
-            |(key, value)| (
-                url_escape::decode(key.as_ref()).into_owned(),
-                url_escape::decode(value.as_ref()).into_owned(),
-            )
-        ).collect();
-        // Parse the path segments.
-        // TODO: Abstract as `enum Route`?
-        let mut path: Vec<String> = absolute_url.path_segments().ok_or(HttpError::Invalid)?.map(
-            |s| url_escape::decode(s).into_owned()
-        ).collect();
-        if let Some(last) = path.last() {
-            if "" == last { path.pop(); }
-        }
-        // Dispatch based on HTTP method.
-        match request.method() {
-            Method::Get => self.handle_get(&absolute_url, &path, &params),
-            _ => Err(HttpError::Invalid),
-        }
-    }
-
-    /// Construct an HTTP header.
-    fn header(key: &str, value: &str) -> tiny_http::Header {
-        Header::from_bytes(
-            key.as_bytes(),
-            value.as_bytes(),
-        ).unwrap() // depends only on data fixed at compile time
-    }
-
-    /// Handle requests for ever.
-    fn handle_requests(&self) {
-        for mut request in self.server.incoming_requests() {
-            match self.handle_request(&mut request) {
-                Ok(HttpOkay::File(file)) => {
-                    request.respond(Response::from_file(file))
-                },
-                Ok(HttpOkay::Html(text)) => {
-                    let header = Self::header("Content-Type", "text/html");
-                    request.respond(Response::from_string(text).with_header(header))
-                },
-                Ok(HttpOkay::Jpeg(data)) => {
-                    let header = Self::header("Content-Type", "image/jpeg");
-                    request.respond(Response::from_data(data).with_header(header))
-                },
-                Err(HttpError::Invalid) => {
-                    request.respond(Response::from_string("Invalid request").with_status_code(400))
-                },
-                Err(HttpError::NotFound) => {
-                    request.respond(Response::from_string("Not found").with_status_code(404))
-                },
-                Err(e) => {
-                    println!("Error: {}", e);
-                    request.respond(Response::from_string("Internal error").with_status_code(500))
-                },
-            }.unwrap_or_else(|e2| println!("IO Error: {}", e2));
-        }
-    }
 }
 
 // ----------------------------------------------------------------------------
 
-/// The default server address and port to listen on.
-const SERVER_ADDRESS: &'static str = "127.0.0.1:8082";
+/// Where the photo albums are.
 const DOCUMENT_ROOT: &'static str = "./document_root";
+
+/// Where we can cache thumbnails.
 const THUMBNAIL_ROOT: &'static str = "./thumbnail_root";
 
+/// The default server address and port to listen on.
+const SERVER_ADDRESS: &'static str = "127.0.0.1:8082";
+
 fn main() {
-    let server_address = env::var("PHOTO_SERVER_ADDRESS").unwrap_or_else(|_| SERVER_ADDRESS.to_owned());
-    let server_url = format!("http://{}", server_address);
-    let base_url = env::var("PHOTO_SERVER_BASE_URL").unwrap_or_else(|_| server_url.clone());
+    // Application-specific part.
     let document_root = env::var("PHOTO_SERVER_DOCUMENT_ROOT").unwrap_or_else(|_| DOCUMENT_ROOT.to_owned());
     let thumbnail_root = env::var("PHOTO_SERVER_THUMBNAIL_ROOT").unwrap_or_else(|_| THUMBNAIL_ROOT.to_owned());
-    let server = PhotoServer::new(&server_address, &base_url, &document_root, &thumbnail_root);
-    println!("Listening on {}", server_url);
-    server.handle_requests();
+    let photo_server = PhotoServer::new(&document_root, &thumbnail_root);
+    // Web server part.
+    let server_address = env::var("PHOTO_SERVER_ADDRESS").unwrap_or_else(|_| SERVER_ADDRESS.to_owned());
+    let base_url = env::var("PHOTO_SERVER_BASE_URL").ok();
+    // Run for ever!
+    server::start(server_address, base_url, photo_server);
 }
