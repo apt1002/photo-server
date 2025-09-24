@@ -102,12 +102,26 @@ impl_httperror_from!(DubiousFilename);
 
 /// Implement this to write your web application.
 pub trait Handler {
-    /// Represents the URL request parameters that are recognised by this Handler.
+    /// Represents the URL request parameters that are recognised by this
+    /// Handler.
+    ///
+    /// A [`std::collections::HashMap`] is a possible choice, or you can
+    /// provide something with more type-checking.
     type Params: FromIterator<(String, String)>;
 
+    /// Called for each GET request.
+    ///
+    /// - path - The part of the requested URL relative to `base_url`.
+    ///   For example if this Handler is at `http://example.com/foo` and
+    ///   the client requests is `http://example.com/foo/bar/baz` then `path`
+    ///   will be `["bar", "baz"]`.
+    /// - params - the parsed URL request parameters.
+    ///
+    /// Note that the [`String`]s in `path` and `params` might contain special
+    /// characters such as `/` and `?`, and non-ASCII characters. Be careful if
+    /// you construct filesystem paths from these `String`s.
     fn handle_get(
         &self,
-        absolute_url: Url,
         path: Vec<String>,
         params: Self::Params,
     ) -> Result<HttpOkay, HttpError>;
@@ -119,34 +133,41 @@ struct Server<H: Handler> {
     /// Web server.
     pub server: tiny_http::Server,
 
-    /// The external URL of the server.
-    pub base_url: Url,
+    /// The local URL that `server` serves.
+    pub server_url: Url,
+
+    /// The publicly visible external URL, which may differ from `server_url`.
+    pub _base_url: Url,
 
     /// The application-specific state.
     pub handler: H,
 }
 
 impl<H: Handler> Server<H> {
-    fn new(addr: &str, base_url: &str, handler: H) -> Self {
+    fn new(server_address: &str, base_url: Option<&str>, handler: H) -> Self {
+        let server_url = &format!("http://{}/", server_address);
+        let base_url = base_url.unwrap_or_else(|| server_url);
         Server {
-            server: tiny_http::Server::http(addr).expect("Could not create the web server"),
-            base_url: url::Url::parse(base_url).expect("Could not parse the base URL"),
+            server: tiny_http::Server::http(server_address).expect("Could not create the web server"),
+            server_url: url::Url::parse(server_url).expect("Could not parse the server URL"),
+            _base_url: url::Url::parse(base_url).expect("Could not parse the base URL"),
             handler,
         }
     }
 
     fn handle_request(&self, request: &mut Request) -> Result<HttpOkay, HttpError> {
-        let absolute_url = self.base_url.join(request.url())?;
-        println!("{} {}", request.remote_addr().unwrap().ip(), absolute_url);
+        let request_url = self.server_url.join(request.url())?;
+        let relative_url = self.server_url.make_relative(&request_url).unwrap(); // By construction.
+        println!("{} {}", request.remote_addr().unwrap().ip(), relative_url);
         // Parse the query parameters.
-        let params = absolute_url.query_pairs().map(
+        let params = request_url.query_pairs().map(
             |(key, value)| (
                 url_escape::decode(key.as_ref()).into_owned(),
                 url_escape::decode(value.as_ref()).into_owned(),
             )
         ).collect();
         // Parse the path segments.
-        let mut path: Vec<String> = absolute_url.path_segments().ok_or(HttpError::Invalid)?.map(
+        let mut path: Vec<String> = request_url.path_segments().ok_or(HttpError::Invalid)?.map(
             |s| url_escape::decode(s).into_owned()
         ).collect();
         if let Some(last) = path.last() {
@@ -154,7 +175,7 @@ impl<H: Handler> Server<H> {
         }
         // Dispatch based on HTTP method.
         match request.method() {
-            Method::Get => self.handler.handle_get(absolute_url, path, params),
+            Method::Get => self.handler.handle_get(path, params),
             _ => Err(HttpError::Invalid),
         }
     }
@@ -198,10 +219,15 @@ impl<H: Handler> Server<H> {
     }
 }
 
+/// Run for ever!
+///
+/// - server_address - E.g. "127.0.0.1:8082".
+/// - base_url - The publicly visible URL of this web server, if any. It should
+///   end with `/`. This is useful for constructing absolute URLs.
+///   If `server_address` is public, `base_url` can be omitted.
+/// - handler - Defines the web application.
 pub fn start(server_address: String, base_url: Option<String>, handler: impl Handler) -> ! {
-    let server_url = format!("http://{}", server_address);
-    let base_url = base_url.unwrap_or_else(|| server_url.clone());
-    let server = Server::new(&server_address, &base_url, handler);
-    println!("Listening on {}", server_url);
+    let server = Server::new(&server_address, base_url.as_ref().map(AsRef::as_ref), handler);
+    println!("Listening on {}", server.server_url);
     server.handle_requests();
 }

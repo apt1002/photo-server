@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::path::{Path};
 
 mod server;
-use server::{Handler, HttpOkay, HttpError, html_escape, Url, remove_extension, validate_name};
+use server::{Handler, HttpOkay, HttpError, html_escape, remove_extension, validate_name};
 
 // ----------------------------------------------------------------------------
 
@@ -269,7 +269,6 @@ impl<'a> Handler for PhotoServer<'a> {
     /// Handle a single request.
     fn handle_get(
         &self,
-        _absolute_url: Url,
         path: Vec<String>,
         params: Self::Params,
     ) -> Result<HttpOkay, HttpError> {
