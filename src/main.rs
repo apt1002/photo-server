@@ -114,7 +114,7 @@ impl fmt::Display for Dimensions {
 // ----------------------------------------------------------------------------
 
 /// Information about a request.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Hash, PartialEq, Eq)]
 struct Params {
     /// The user-requested width, if any.
     pub w: Option<u32>,
@@ -124,20 +124,26 @@ struct Params {
 }
 
 impl Params {
-    /// Parse query parameters.
-    fn new(params: &HashMap<String, String>) -> Self {
-        let parse_u32 = |key: &'static str| {
-            params.get(key).and_then(|s| s.trim().parse::<u32>().ok())
-        };
-        Self {w: parse_u32("w"), h: parse_u32("h")}
-    }
-
     /// Fill in missing parameters with default values, and apply maxima.
     pub fn get_dimensions(&self) -> Dimensions {
         Dimensions {
             w: 2048 .min(if let Some(w) = self.w { w } else { 800 }),
             h: 2048 .min(if let Some(h) = self.h { h } else { 600 }),
         }
+    }
+}
+
+/// Parse a u32, ignoring white-space, and mapping errors to `None`.
+fn parse_u32(s: impl AsRef<str>) -> Option<u32> { s.as_ref().trim().parse::<u32>().ok() }
+
+impl FromIterator<(String, String)> for Params {
+    fn from_iter<T: IntoIterator<Item = (String, String)>>(iter: T) -> Self {
+        let mut ret = Self::default();
+        for (key, value) in iter.into_iter() {
+            if "w" == key { ret.w = parse_u32(value); }
+            else if "h" == key { ret.h = parse_u32(value); }
+        }
+        ret
     }
 }
 
@@ -354,12 +360,12 @@ r#"<html>
         let absolute_url = self.base_url.join(request.url())?;
         println!("{} {}", request.remote_addr().unwrap().ip(), absolute_url);
         // Parse the query parameters.
-        let params = Params::new(&absolute_url.query_pairs().map(
+        let params: Params = absolute_url.query_pairs().map(
             |(key, value)| (
                 url_escape::decode(key.as_ref()).into_owned(),
                 url_escape::decode(value.as_ref()).into_owned(),
             )
-        ).collect());
+        ).collect();
         // Parse the path segments.
         // TODO: Abstract as `enum Route`?
         let mut path: Vec<String> = absolute_url.path_segments().ok_or(HttpError::Invalid)?.map(
