@@ -4,11 +4,24 @@ use std::error::{Error};
 use std::ffi::{OsStr, OsString};
 use std::fs::{File};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 
 use html_escape::{encode_text as escape};
 use tiny_http::{Method, Request, Response, Header};
 use url::{Url};
+
+/// Given `"foo.BAR"` and `"bar"` returns `Some("foo")`.
+fn remove_extension<'f>(filename: &'f str, extension: &str) -> Option<&'f str> {
+    if let Some(index) = filename.len().checked_sub(".".len() + extension.len()) {
+        if let Some((ret, tail)) = filename.split_at_checked(index) {
+            let mut tail = tail.chars();
+            if let Some('.') = tail.next() {
+                if extension.eq_ignore_ascii_case(tail.as_str()) { return Some(ret); }
+            }
+        }
+    }
+    None
+}
 
 // ----------------------------------------------------------------------------
 
@@ -131,37 +144,33 @@ impl Params {
 // ----------------------------------------------------------------------------
 
 /// Contents of an album directory.
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 struct Album {
-    readme: Option<PathBuf>,
-    jpegs: Vec<PathBuf>,
-    others: Vec<PathBuf>,
+    readme: Option<String>,
+    jpegs: Vec<String>,
+    others: Vec<String>,
 }
 
 impl Album {
     fn new(dir_name: &Path) -> Result<Self, HttpError> {
-        let mut readme: Option<PathBuf> = None;
-        let mut jpegs: Vec<PathBuf> = Vec::new();
-        let mut others: Vec<PathBuf> = Vec::new();
+        let mut ret = Self::default();
         for dir_entry in dir_name.read_dir()? {
-            if let Some(path) = dir_entry?.path().file_name() {
-                let path = PathBuf::from(validate_name(path)?);
-                if path.as_os_str() == "README.txt" {
-                    readme = Some(path);
+            if let Some(filename) = dir_entry?.path().file_name() {
+                let filename = validate_name(filename)?;
+                if filename == "README.txt" {
+                    ret.readme = Some(filename.into());
                 } else {
-                    if let Some(extension) = path.extension() {
-                        if extension == "JPG" || extension == "jpg" {
-                            jpegs.push(path);
-                        } else {
-                            others.push(path);
-                        }
+                    if let Some(_) = remove_extension(filename, "jpg") {
+                        ret.jpegs.push(filename.into());
+                    } else {
+                        ret.others.push(filename.into());
                     }
                 }
             }
         }
-        jpegs.sort();
-        others.sort();
-        Ok(Self {readme, jpegs, others})
+        ret.jpegs.sort();
+        ret.others.sort();
+        Ok(ret)
     }
 }
 
@@ -204,7 +213,7 @@ impl<'a> PhotoServer<'a> {
     }
 
     /// Show thumbnails for all photos in a directory.
-    pub fn index(&self, dir_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
+    pub fn index(&self, dir_name: &str, params: &Params) -> Result<HttpOkay, HttpError> {
         let dimensions = params.get_dimensions();
         let album = Album::new(&self.document_root.join(dir_name))?;
         let readme = if let Some(name) = &album.readme {
@@ -219,11 +228,11 @@ impl<'a> PhotoServer<'a> {
         };
         let jpegs: Vec<_> = album.jpegs.iter().map(|name| format!(
             r#"<a href="{name}.html{dimensions}"><img src="{name}.thumb"/></a>"#,
-            name = name.display(),
+            name = name,
         )).collect();
         let others: Vec<_> = album.others.iter().map(|name| format!(
             r#"<a href="{name}">{name}</a>"#,
-            name = name.display(),
+            name = name,
         )).collect();
         Ok(HttpOkay::Html(format!(
 r#"<html>
@@ -239,7 +248,7 @@ r#"<html>
   {others}
  </body>
 </html>"#,
-            dir_name = dir_name.display(),
+            dir_name = dir_name,
             readme = readme,
             jpegs = jpegs.join("\n  "),
             others = others.join("\n  "),
@@ -247,20 +256,20 @@ r#"<html>
     }
 
     /// Serve a resized JPEG file.
-    pub fn rescale(&self, dir_name: &Path, leaf_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
+    pub fn rescale(&self, dir_name: &str, leaf_name: &str, params: &Params) -> Result<HttpOkay, HttpError> {
         let jpeg_name = self.document_root.join(dir_name).join(leaf_name);
         Ok(HttpOkay::Jpeg(Self::resize_jpeg(&jpeg_name, params.get_dimensions())?))
     }
 
     /// Show an HTML frame around a single photo.
-    pub fn frame(&self, dir_name: &Path, leaf_name: &Path, params: &Params) -> Result<HttpOkay, HttpError> {
+    pub fn frame(&self, dir_name: &str, leaf_name: &str, params: &Params) -> Result<HttpOkay, HttpError> {
         let dimensions = params.get_dimensions();
         // Enumerate the JPEG files in `dir_name` and compute
         // `prev` and `next` links.
         let mut paths = Album::new(&self.document_root.join(dir_name))?.jpegs;
         paths.sort();
-        let mut previouses: HashMap<&Path, &Path> = HashMap::new();
-        let mut nexts: HashMap<&Path, &Path> = HashMap::new();
+        let mut previouses: HashMap<&str, &str> = HashMap::new();
+        let mut nexts: HashMap<&str, &str> = HashMap::new();
         let mut prev = paths.last().ok_or(HttpError::NotFound)?;
         for p in &paths {
             previouses.insert(&p, &prev);
@@ -311,11 +320,11 @@ r#"<html>
 </form>
 </body>
 </html>"#,
-            dir_name = dir_name.display(),
-            base_name = leaf_name.with_extension("").display(),
-            leaf_name = leaf_name.display(),
-            previous = previouses.get(leaf_name).ok_or(HttpError::NotFound)?.display(),
-            next = nexts.get(leaf_name).ok_or(HttpError::NotFound)?.display(),
+            dir_name = dir_name,
+            base_name = remove_extension(leaf_name, "jpg").unwrap(), // Checked by caller.
+            leaf_name = leaf_name,
+            previous = previouses.get(leaf_name).ok_or(HttpError::NotFound)?,
+            next = nexts.get(leaf_name).ok_or(HttpError::NotFound)?,
             dimensions = dimensions,
             w = dimensions.w,
             h = dimensions.h,
@@ -323,7 +332,7 @@ r#"<html>
     }
 
     /// Serve a JPEG thumbnail.
-    pub fn thumb(&self, dir_name: &Path, leaf_name: &Path, _params: &Params) -> Result<HttpOkay, HttpError> {
+    pub fn thumb(&self, dir_name: &str, leaf_name: &str, _params: &Params) -> Result<HttpOkay, HttpError> {
         let thumbnail_dir = self.thumbnail_root.join(dir_name);
         std::fs::create_dir_all(&thumbnail_dir)?;
         let thumbnail_name = thumbnail_dir.join(leaf_name);
@@ -342,52 +351,43 @@ r#"<html>
             _ => return Err(HttpError::Invalid),
         }
 
-        let url = request.url();
-        let url = self.base_url.join(&url)?;
-        println!("{} {}", request.remote_addr().unwrap().ip(), url);
+        let absolute_url = self.base_url.join(request.url())?;
+        println!("{} {}", request.remote_addr().unwrap().ip(), absolute_url);
         // Parse the query parameters.
-        let params = Params::new(&url.query_pairs().map(
+        let params = Params::new(&absolute_url.query_pairs().map(
             |(key, value)| (
                 url_escape::decode(key.as_ref()).into_owned(),
-                            url_escape::decode(value.as_ref()).into_owned(),
+                url_escape::decode(value.as_ref()).into_owned(),
             )
         ).collect());
         // Parse the path segments.
-        let mut path_segments = Vec::new();
-        for s in url.path_segments().unwrap() {
-            path_segments.push(PathBuf::from(validate_name(s.as_ref())?));
-        }
-        if let Some(last) = path_segments.last() {
-            if last.as_os_str() == "" { path_segments.pop(); }
+        // TODO: Abstract as `enum Route`?
+        let mut path: Vec<String> = absolute_url.path_segments().ok_or(HttpError::Invalid)?.map(
+            |s| url_escape::decode(s).into_owned()
+        ).collect();
+        if let Some(last) = path.last() {
+            if "" == last { path.pop(); }
         }
         // Dispatch to the appropriate method.
-        let mut path_iter = path_segments.into_iter();
+        let mut path_iter = path.into_iter();
         let dir_name = &path_iter.next().ok_or(HttpError::Invalid)?;
         if let Some(leaf_name) = &path_iter.next() {
-            if let Some(extension) = leaf_name.extension() {
-                if extension == "jpg" || extension == "JPG" {
-                    if params.w.is_some() || params.h.is_some() {
-                        return self.rescale(dir_name, leaf_name, &params);
-                    }
-                } else if extension == "html" {
-                    let leaf_name = leaf_name.with_extension("");
-                    if let Some(extension) = leaf_name.extension() {
-                        if extension == "jpg" || extension == "JPG" {
-                            return self.frame(dir_name, &leaf_name, &params);
-                        }
-                    }
-                } else if extension == "thumb" {
-                    let leaf_name = leaf_name.with_extension("");
-                    if let Some(extension) = leaf_name.extension() {
-                        if extension == "jpg" || extension == "JPG" {
-                            return self.thumb(dir_name, &leaf_name, &params);
-                        }
-                    }
+            if let Some(_) = remove_extension(leaf_name, "jpg") {
+                if params.w.is_some() || params.h.is_some() {
+                    return self.rescale(dir_name, leaf_name, &params);
+                }
+            } else if let Some(jpeg_name) = remove_extension(leaf_name, "html") {
+                if let Some(_) = remove_extension(jpeg_name, "jpg") {
+                    return self.frame(dir_name, &jpeg_name, &params);
+                }
+            } else if let Some(jpeg_name) = remove_extension(leaf_name, "thumb") {
+                if let Some(_) = remove_extension(jpeg_name, "jpg") {
+                    return self.thumb(dir_name, &jpeg_name, &params);
                 }
             }
             // Any other `leaf_name` is a static file.
-            let name = self.document_root.join(dir_name).join(leaf_name);
-            return Ok(HttpOkay::File(File::open(&name)?));
+            let document_name = self.document_root.join(dir_name).join(leaf_name);
+            return Ok(HttpOkay::File(File::open(&document_name)?));
         } else {
             return self.index(dir_name, &params);
         }
@@ -395,11 +395,10 @@ r#"<html>
 
     /// Construct an HTTP header.
     fn header(key: &str, value: &str) -> tiny_http::Header {
-        let key_b = key.as_bytes();
-        let val_b = value.as_bytes();
         Header::from_bytes(
-            key_b, val_b)
-        .unwrap() // depends only on data fixed at compile time
+            key.as_bytes(),
+            value.as_bytes(),
+        ).unwrap() // depends only on data fixed at compile time
     }
 
     /// Handle requests for ever.
